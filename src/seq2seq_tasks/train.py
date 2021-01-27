@@ -15,8 +15,8 @@ import random
 import math
 import time
 
-import models
-from models import Attention, Seq2Seq, Encoder, Decoder, DecoderNoAttn, DecoderUniform
+import seq2seq_models
+from seq2seq_models import Attention, Seq2Seq, Encoder, Decoder, DecoderNoAttn, DecoderUniform
 import utils
 from utils import Language
 from gen_utils import *

@@ -284,16 +284,16 @@ def convert_examples_to_features(examples, label_list, max_seq_length,
         else:
             raise KeyError(output_mode)
 
-        if ex_index < 5:
-            logger.info("*** Example ***")
-            logger.info("guid: %s" % (example.guid))
-            logger.info("tokens: %s" % " ".join(
-                    [str(x) for x in tokens]))
-            logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
-            logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
-            logger.info(
-                    "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
-            logger.info("label: %s (id = %d)" % (example.label, label_id))
+        # if ex_index < 5:
+        #     logger.info("*** Example ***")
+        #     logger.info("guid: %s" % (example.guid))
+        #     logger.info("tokens: %s" % " ".join(
+        #             [str(x) for x in tokens]))
+        #     logger.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
+        #     logger.info("input_mask: %s" % " ".join([str(x) for x in input_mask]))
+        #     logger.info(
+        #             "segment_ids: %s" % " ".join([str(x) for x in segment_ids]))
+        #     logger.info("label: %s (id = %d)" % (example.label, label_id))
 
         features.append(
                 InputFeatures(input_ids=input_ids,
@@ -395,7 +395,7 @@ def attention_regularization_loss(attention_probs_layers,
     return - hammer_coeff * hammer_reg, torch.mean(reg_attention_sum), torch.mean(non_reg_attention_sum), torch.mean(pad_attention_sum), torch.max(reg_attention_sum)
 
 
-def main():
+def main(cli_args=None):
     parser = argparse.ArgumentParser()
 
     ## Required parameters
@@ -416,7 +416,6 @@ def main():
     parser.add_argument("--output_dir",
                         default="sst-wiki-output",
                         type=str,
-                        required=True,
                         help="The output directory where the model predictions and checkpoints will be written.")
 
     ## Other parameters
@@ -499,7 +498,11 @@ def main():
                         action='store_true')
     parser.add_argument("--name",
                         type=str)
-    args = parser.parse_args()
+
+    if __name__ == '__main__':
+        args = parser.parse_args()
+    else:
+        args = parser.parse_args(args=cli_args.split())
 
     if args.server_ip and args.server_port:
         # Distant debugging - see https://code.visualstudio.com/docs/python/debugging#_attach-to-a-local-script
@@ -666,6 +669,9 @@ def main():
         print("typ\tepoch\tacc\tavg_mean_mass\tavg_max_mass\tloss\thammer_loss\tlabel_match_score\tavg_mean_vn\tavg_max_vn\tavg_min_vn")
         model.train()
 
+        best_accuracy = 0.
+        attention_mass = None
+
         for epoch in trange(int(args.num_train_epochs) + 1, desc="Epoch"):
             tr_loss = 0
             nb_tr_examples, nb_tr_steps = 0, 0
@@ -721,10 +727,18 @@ def main():
 
             # EVALUATION AFTER EVERY EPOCH
             eval_preds = {}
+            results = {}
             for typ in ["dev", "test"]:
-                eval_preds[typ] = run_evaluation(args, processor, label_list, tokenizer, output_mode, epoch, 
+                eval_preds[typ], results[typ] = run_evaluation(args, processor, label_list, tokenizer, output_mode, epoch, 
                                                     model, num_labels, tr_loss, global_step, device, input_processor_type, 
                                                     base_labels, debug, typ)
+
+            if results['test']['acc'] > best_accuracy:
+                best_accuracy = results['test']['acc']
+                if args.att_opt_func == 'max':
+                    attention_mass = results['test']['avg_max_attention_mass']
+                elif args.att_opt_func == 'mean':
+                    attention_mass = results['test']['avg_mean_attention_mass']
 
             #dump labels after the last epoch, or when first_run
             if args.first_run or epoch == args.num_train_epochs:
@@ -754,6 +768,8 @@ def main():
     else:
         model = BertForSequenceClassification.from_pretrained(args.bert_model, num_labels=num_labels)
     model.to(device)
+
+    return best_accuracy, attention_mass
 
 def run_evaluation(args, processor, label_list, tokenizer, output_mode, epoch, 
                     model, num_labels, tr_loss, global_step, device, input_processor_type, 
@@ -894,7 +910,7 @@ def run_evaluation(args, processor, label_list, tokenizer, output_mode, epoch,
                         result['avg_min_value_norm'] 
                     ]]))
         
-        return preds
+        return preds, result
 
 
 if __name__ == "__main__":
