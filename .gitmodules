@@ -1,3 +1,6 @@
 [submodule "src/classification_tasks/log"]
 	path = src/classification_tasks/log
 	url = git@github.com:danishpruthi/log.git
+[submodule "src/seq2seq_tasks/log"]
+	path = src/seq2seq_tasks/log
+	url = git@github.com:danishpruthi/log.git
