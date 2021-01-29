@@ -369,7 +369,7 @@ def run_classification_experiment(task_name, seed=1, c_entropy=0., c_hammer=0., 
 
     print ("starting to train")
 
-
+    stopcon = 0
     best_dev_accuracy  = 0.
     best_dev_loss = np.inf
     best_test_accuracy = 0.
@@ -441,6 +441,7 @@ def run_classification_experiment(task_name, seed=1, c_entropy=0., c_hammer=0., 
                             num_vis=num_vis, emb_size=emb_size, flow=flow, understand=understand, c_hammer=c_hammer, c_kld=c_kld, c_entropy=c_entropy)
 
         if ((not use_loss) and dev_acc > best_dev_accuracy) or (use_loss and dev_loss < best_dev_loss):
+            stopcon = 0
 
             if use_loss:
                 best_dev_loss = dev_loss
@@ -455,7 +456,11 @@ def run_classification_experiment(task_name, seed=1, c_entropy=0., c_hammer=0., 
                 dump_attention_maps(train, prefix + "train.txt.attn." + model_type, model)
                 dump_attention_maps(dev, prefix + "dev.txt.attn." + model_type, model)
                 dump_attention_maps(test, prefix + "test.txt.attn." + model_type, model)
+        else:
+            stopcon += 1
 
+        if stopcon == 2:
+            break
 
         print ("iter %r: best test accuracy = %.4f attained after epoch = %d" %(
             ITER, best_test_accuracy, best_epoch))
@@ -479,7 +484,7 @@ if __name__ == '__main__':
             help = 'select the model you want to run')
 
     parser.add_argument('--task', dest='task', default='pronoun',
-            choices=('pronoun', 'sst', 'sst-wiki', 'sst-wiki-unshuff', 'reco', 'reco-rank', 'de-pronoun', 'de-refs', 'de-sst-wiki', 'occupation-classification', 'de-occupation-classification', 'occupation-classification_all'),
+            choices=('pronoun', 'sst', 'sst-wiki', 'sst-wiki-finegrained', 'sst-wiki-unshuff', 'reco', 'reco-rank', 'de-pronoun', 'de-refs', 'de-sst-wiki', 'occupation-classification', 'de-occupation-classification', 'occupation-classification_all'),
             help = 'select the task you want to run on')
 
     parser.add_argument('--num-epochs', dest='num_epochs', type=int, default=5,
