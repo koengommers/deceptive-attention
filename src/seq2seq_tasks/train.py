@@ -209,7 +209,7 @@ def evaluate(model, data, criterion):
         100. * total_attn_mass_imp/total_trg
 
 
-def generate(model, data):
+def generate(model, data, trg_lang):
     
     # NOTE this assumes batch size 1
     model.eval()
@@ -232,12 +232,15 @@ def generate(model, data):
             # output, attention = model(src, src_len, None, 0) #turn off teacher forcing
             output, attention = model(src, src_len, None, 0) #turn off teacher forcg
 
-            output = output[1:].squeeze(dim=1)
-            #output = [(trg sent len - 1), output dim]
+            if output.size(0) == 1:
+                generated_tokens = []
+            else:
+                output = output[1:].squeeze(dim=1)
+                #output = [(trg sent len - 1), output dim]
 
-            preds = torch.argmax(output, dim=1) # long tensor 
-            #shape [trg len - 1]
-            generated_tokens = [trg_lang.get_word(w) for w in preds.cpu().numpy()]
+                preds = torch.argmax(output, dim=1) # long tensor 
+                #shape [trg len - 1]
+                generated_tokens = [trg_lang.get_word(w) for w in preds.cpu().numpy()]
 
             generated_lines.append(" ".join(generated_tokens))
 
@@ -490,7 +493,7 @@ def run_seq2seq_experiment(task='copy', debug=False, coeff=0.0, num_epochs=5, se
         # generate the output to copmute bleu scores as well...
         log.pr_green("generating the output translations from the model")
         test_batches_single = list(get_batches(test_sents[0], test_sents[1], test_sents[2], 1, src_lang, trg_lang))
-        output_lines = generate(model, test_batches_single)
+        output_lines = generate(model, test_batches_single, trg_lang)
         log.pr_green("[done] .... now dumping the translations")
         outfile = DATA_DIR + task + SUFFIX + "_seed" + str(seed) + \
             '_coeff=' + str(coeff) +  '_num-train=' + str(num_train) + ".test.out"
