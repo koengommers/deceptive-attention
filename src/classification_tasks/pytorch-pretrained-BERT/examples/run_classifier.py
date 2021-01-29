@@ -41,6 +41,8 @@ from pytorch_pretrained_bert_local.modeling import BertForSequenceClassification
 from pytorch_pretrained_bert_local.tokenization import BertTokenizer
 from pytorch_pretrained_bert_local.optimization import BertAdam, WarmupLinearSchedule
 
+from util import anonymize
+
 logger = logging.getLogger(__name__)
 
 
@@ -78,6 +80,8 @@ class InputFeatures(object):
 
 class DataProcessor(object):
     """Base class for data converters for sequence classification data sets."""
+    def __init__(self, anon=False):
+        self.anon = anon
 
     def get_train_examples(self, data_dir):
         """Gets a collection of `InputExample`s for the train set."""
@@ -110,6 +114,9 @@ class DataProcessor(object):
 
 class SstWikiProcessor(DataProcessor):
     """Processor for the SST-binary + Wikipedia data set (sentence level)."""
+
+    def __init__(self, anon=False):
+        super().__init__(anon)
 
     def get_train_examples(self, data_dir, limit=0):
         """See base class."""
@@ -147,15 +154,30 @@ class SstWikiProcessor(DataProcessor):
             guid = "%s-%s" % (set_type, i)
             label_text = line.split('\t', 1)
             text_split = label_text[1].split('[SEP]')
-            text_sst = text_split[0].strip()
-            text_wiki = text_split[1].strip() 
+            # ORIGINALLY this sst and wiki were swapped but this is wrong
+            text_sst = text_split[1].strip()
+            text_wiki = text_split[0].strip() 
             label = label_text[0]
+
+            # Do not use sst text for baseline.
+            if self.anon:
+                text_sst = None
+
             examples.append(
                 InputExample(guid=guid, text_a=text_wiki, text_b=text_sst, label=label))
         return examples
 
+class SstWikiFinegrainedProcessor(SstWikiProcessor):
+
+    def get_labels(self):
+        return ["0", "1", "2", "3", "4"]
+
 class PronounProcessor(DataProcessor):
     """Processor for the Pronoun data set (sentence level)."""
+
+    def __init__(self, anon=False):
+        super().__init__(anon)
+
 
     def get_train_examples(self, data_dir, limit=0):
         """See base class."""
@@ -201,6 +223,10 @@ class PronounProcessor(DataProcessor):
             label = label_text[0]
             text = label_text[1]
             block = block_lines[i]
+            # Anonymize words for baseline.
+            if self.anon:
+                text = anonymize(text)
+                block = None
             examples.append(
                 InputExample(guid=guid, text_a=text, text_b=None, label=label, block=block))
         return examples
@@ -346,7 +372,7 @@ def pearson_and_spearman(preds, labels):
 
 def compute_metrics(input_processor_type, preds, labels):
     assert len(preds) == len(labels)
-    if input_processor_type == "sst-wiki" or input_processor_type == "pronoun":
+    if input_processor_type in ["sst-wiki", "pronoun", "sst-wiki-finegrained"]:
         return {"acc": simple_accuracy(preds, labels)}
     else:
         raise KeyError(input_processor_type)
@@ -498,6 +524,8 @@ def main(cli_args=None):
                         action='store_true')
     parser.add_argument("--name",
                         type=str)
+    parser.add_argument("--anon", action="store_true",
+                        help="Whether to delete/anonymize impermissable tokens.")
 
     if __name__ == '__main__':
         args = parser.parse_args()
@@ -526,13 +554,17 @@ def main(cli_args=None):
 
     processors = {
         "sst-wiki": SstWikiProcessor,
-        "pronoun": PronounProcessor
+        "pronoun": PronounProcessor,
+        "sst-wiki-finegrained": SstWikiFinegrainedProcessor
     }
 
     output_modes = {
         "sst-wiki": "classification",
         "pronoun": "classification",
+        "sst-wiki-finegrained": "classification"
     }
+
+    print('USING CUDA' if torch.cuda.is_available() and not args.no_cuda else 'NOT USING CUDA')
 
     if args.local_rank == -1 or args.no_cuda:
         device = torch.device("cuda" if torch.cuda.is_available() and not args.no_cuda else "cpu")
@@ -576,7 +608,7 @@ def main(cli_args=None):
     if input_processor_type not in processors:
         raise ValueError("Task not found: %s" % (input_processor_type))
 
-    processor = processors[input_processor_type]()
+    processor = processors[input_processor_type](args.anon)
     output_mode = output_modes[input_processor_type]
 
     label_list = processor.get_labels()
@@ -733,7 +765,7 @@ def main(cli_args=None):
                                                     model, num_labels, tr_loss, global_step, device, input_processor_type, 
                                                     base_labels, debug, typ)
 
-            if results['test']['acc'] > best_accuracy:
+            if results['dev']['acc'] > best_accuracy:
                 best_accuracy = results['test']['acc']
                 if args.att_opt_func == 'max':
                     attention_mass = results['test']['avg_max_attention_mass']
