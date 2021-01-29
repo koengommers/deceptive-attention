@@ -1,3 +1,5 @@
+import os
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -15,7 +17,7 @@ import random
 import math
 import time
 
-import seq2seq_models
+import seq2seq_models as models
 from seq2seq_models import Attention, Seq2Seq, Encoder, Decoder, DecoderNoAttn, DecoderUniform
 import utils
 from utils import Language
@@ -27,35 +29,11 @@ from tqdm import tqdm
 import log
 from data_utils import compute_frequencies, unkify_lines
 
-# --------------- parse the flags etc ----------------- #
-parser = argparse.ArgumentParser(
-    formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-
-parser.add_argument('--task', dest='task', default='copy',
-        choices=('copy', 'rev', 'binary-flip', 'en-hi', 'en-de'),
-        help = 'select the task you want to run on')
-
-parser.add_argument('--debug', dest='debug', action='store_true')
-parser.add_argument('--loss-coef', dest='loss_coeff', type=float, default=0.0)
-parser.add_argument('--epochs', dest='epochs', type=int, default=5)
-parser.add_argument('--seed', dest='seed', type=int, default=1234)
-parser.add_argument('--uniform', dest='uniform', action='store_true')
-parser.add_argument('--no-attn', dest='no_attn', action='store_true')
-parser.add_argument('--batch-size', dest='batch_size', type=int, default=128)
-parser.add_argument('--num-train', dest='num_train', type=int, default=1000000)
-parser.add_argument('--decode-with-no-attn', dest='no_attn_inference', action='store_true')
-
-
-
-params = vars(parser.parse_args())
-TASK = params['task']
-DEBUG = params['debug']
-COEFF = params['loss_coeff']
-NUM_EPOCHS = params['epochs']
-UNIFORM = params['uniform']
-NO_ATTN = params['no_attn']
-NUM_TRAIN = params['num_train']
-DECODE_WITH_NO_ATTN = params['no_attn_inference']
+DATA_DIR = os.path.dirname(os.path.realpath(__file__)) + '/data/'
+if not os.path.exists(DATA_DIR + 'vocab'):
+    os.mkdir(DATA_DIR + 'vocab')
+if not os.path.exists(DATA_DIR + 'models'):
+    os.mkdir(DATA_DIR + 'models')
 
 INPUT_VOCAB = 10000
 OUTPUT_VOCAB = 10000
@@ -67,8 +45,6 @@ use_cuda = torch.cuda.is_available()
 if use_cuda:
     long_type = torch.cuda.LongTensor
     float_type = torch.cuda.FloatTensor
-
-
 
 # The following function is not being used right now, and is deprecated.
 def generate_mask(attn_shape, list_src_lens=None):
@@ -105,7 +81,7 @@ def generate_mask(attn_shape, list_src_lens=None):
     return mask
 
 
-def train(model, data, optimizer, criterion, clip):
+def train(model, data, optimizer, criterion, clip, coeff):
     
     model.train()
     
@@ -158,7 +134,7 @@ def train(model, data, optimizer, criterion, clip):
         # total_src += non_pad_tokens_src # non pad tokens src
         total_correct += torch.sum((trg == preds) * trg_non_pad_indices).item()
         
-        loss = criterion(output, trg) - COEFF * torch.log(1 - attn_mass_imp/non_pad_tokens_trg)
+        loss = criterion(output, trg) - coeff * torch.log(1 - attn_mass_imp/non_pad_tokens_trg)
         
         loss.backward()
         
@@ -268,15 +244,6 @@ def generate(model, data):
     return generated_lines
 
 
-SEED = params['seed']
-BATCH_SIZE = params['batch_size']
-
-random.seed(SEED)
-torch.manual_seed(SEED)
-torch.backends.cudnn.deterministic = True
-models.set_seed(SEED)
-
-
 def init_weights(m):
     for name, param in m.named_parameters():
         if 'weight' in name:
@@ -288,57 +255,7 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-
-src_lang = Language('src')
-trg_lang = Language('trg')
-
-
-splits = ['train', 'dev', 'test']
-sents = []
-
-
-for sp in splits:
-    src_filename = "./data/" + sp +  "." + TASK + ".src"
-    trg_filename = "./data/" + sp +  "." + TASK + ".trg"
-
-    src_sents = open(src_filename).readlines()
-    trg_sents = open(trg_filename).readlines()
-
-    alignment_filename = "./data/" + sp +  "." + TASK + ".align"
-
-    alignment_sents = open(alignment_filename).readlines()
-
-    if DEBUG: # small scale
-        src_sents = src_sents[:int(1e5)]
-        trg_sents = trg_sents[:int(1e5)]
-        alignment_sents = alignment_sents[: int(1e5)]
-
-    if sp == 'train':
-        src_sents = src_sents[:NUM_TRAIN]
-        trg_sents = trg_sents[:NUM_TRAIN]
-        alignment_sents = alignment_sents[:NUM_TRAIN]
-
-    sents.append([src_sents, trg_sents, alignment_sents])
-
-train_sents = sents[0]
-
-
-'''
-train_src_sents = train_sents[0]
-train_trg_sents = train_sents[1]
-train_alignments = train_sents[2]
-top_src_words = compute_frequencies(train_src_sents, INPUT_VOCAB)
-top_trg_words = compute_frequencies(train_trg_sents, OUTPUT_VOCAB)
-
-train_src_sents = unkify_lines(train_src_sents, top_src_words)
-train_trg_sents = unkify_lines(train_trg_sents, top_trg_words)
-train_sents = train_src_sents, train_trg_sents
-'''
-
-dev_sents = sents[1]
-test_sents = sents[2]
-
-def get_batches(src_sents, trg_sents, alignments, batch_size):
+def get_batches(src_sents, trg_sents, alignments, batch_size, src_lang, trg_lang):
 
     # parallel should be at least equal len
     assert (len(src_sents) == len(trg_sents)) 
@@ -400,130 +317,220 @@ def get_batches(src_sents, trg_sents, alignments, batch_size):
         yield src_sample, src_len, trg_sample, trg_len, aligned_outputs
 
 
+def run_seq2seq_experiment(task='copy', debug=False, coeff=0.0, num_epochs=5, seed=1234, batch_size=128, uniform=False, no_attn=False, num_train=1000000, decode_with_no_attn=False):
+
+    random.seed(seed)
+    torch.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    models.set_seed(seed)
+
+    src_lang = Language('src')
+    trg_lang = Language('trg')
 
 
-train_batches = list(get_batches(train_sents[0], train_sents[1], train_sents[2], BATCH_SIZE))
-src_lang.stop_accepting_new_words()
-trg_lang.stop_accepting_new_words()
-dev_batches = list(get_batches(dev_sents[0], dev_sents[1], dev_sents[2], BATCH_SIZE))
-test_batches = list(get_batches(test_sents[0], test_sents[1], test_sents[2], BATCH_SIZE))
+    splits = ['train', 'dev', 'test']
+    sents = []
 
 
-# --------------------------------------------------------#
-# ------------------- define the model -------------------#
-# --------------------------------------------------------#
-INPUT_DIM = src_lang.get_vocab_size()
-OUTPUT_DIM = trg_lang.get_vocab_size()
-print (f"Input vocab {INPUT_DIM} and output vocab {OUTPUT_DIM}")
-ENC_EMB_DIM = 256
-DEC_EMB_DIM = 256
-ENC_HID_DIM = 512
-DEC_HID_DIM = 512
-ENC_DROPOUT = 0.5
-DEC_DROPOUT = 0.5
-PAD_IDX = utils.PAD_token
-SOS_IDX = utils.SOS_token
-EOS_IDX = utils.EOS_token
-SUFFIX = ""
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    for sp in splits:
+        src_filename = DATA_DIR + sp +  "." + task + ".src"
+        trg_filename = DATA_DIR + sp +  "." + task + ".trg"
 
-attn = Attention(ENC_HID_DIM, DEC_HID_DIM)
-enc = Encoder(INPUT_DIM, ENC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT)
+        src_sents = open(src_filename).readlines()
+        trg_sents = open(trg_filename).readlines()
 
-if UNIFORM: 
-    dec = DecoderUniform(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
-    SUFFIX = "_uniform"
-elif NO_ATTN or DECODE_WITH_NO_ATTN:
-    dec = DecoderNoAttn(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
-    if NO_ATTN: 
-        SUFFIX = "_no-attn"
-else:
-    dec = Decoder(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
+        alignment_filename = DATA_DIR + sp +  "." + task + ".align"
+
+        alignment_sents = open(alignment_filename).readlines()
+
+        if debug: # small scale
+            src_sents = src_sents[:int(1e5)]
+            trg_sents = trg_sents[:int(1e5)]
+            alignment_sents = alignment_sents[: int(1e5)]
+
+        if sp == 'train':
+            src_sents = src_sents[:num_train]
+            trg_sents = trg_sents[:num_train]
+            alignment_sents = alignment_sents[:num_train]
+
+        sents.append([src_sents, trg_sents, alignment_sents])
+
+    train_sents = sents[0]
 
 
-model = Seq2Seq(enc, dec, PAD_IDX, SOS_IDX, EOS_IDX, device).to(device)
-# init weights 
-model.apply(init_weights)
-# count the params 
-print(f'The model has {count_parameters(model):,} trainable parameters')
-optimizer = optim.Adam(model.parameters())
-criterion = nn.CrossEntropyLoss(ignore_index = PAD_IDX)
-# --------- end of model definiition --------- #
+    '''
+    train_src_sents = train_sents[0]
+    train_trg_sents = train_sents[1]
+    train_alignments = train_sents[2]
+    top_src_words = compute_frequencies(train_src_sents, INPUT_VOCAB)
+    top_trg_words = compute_frequencies(train_trg_sents, OUTPUT_VOCAB)
+
+    train_src_sents = unkify_lines(train_src_sents, top_src_words)
+    train_trg_sents = unkify_lines(train_trg_sents, top_trg_words)
+    train_sents = train_src_sents, train_trg_sents
+    '''
+
+    dev_sents = sents[1]
+    test_sents = sents[2]
+
+    train_batches = list(get_batches(train_sents[0], train_sents[1], train_sents[2], batch_size, src_lang, trg_lang))
+    src_lang.stop_accepting_new_words()
+    trg_lang.stop_accepting_new_words()
+    dev_batches = list(get_batches(dev_sents[0], dev_sents[1], dev_sents[2], batch_size, src_lang, trg_lang))
+    test_batches = list(get_batches(test_sents[0], test_sents[1], test_sents[2], batch_size, src_lang, trg_lang))
 
 
-# NUM_EPOCHS = 5
+    # --------------------------------------------------------#
+    # ------------------- define the model -------------------#
+    # --------------------------------------------------------#
+    INPUT_DIM = src_lang.get_vocab_size()
+    OUTPUT_DIM = trg_lang.get_vocab_size()
+    print (f"Input vocab {INPUT_DIM} and output vocab {OUTPUT_DIM}")
+    ENC_EMB_DIM = 256
+    DEC_EMB_DIM = 256
+    ENC_HID_DIM = 512
+    DEC_HID_DIM = 512
+    ENC_DROPOUT = 0.5
+    DEC_DROPOUT = 0.5
+    PAD_IDX = utils.PAD_token
+    SOS_IDX = utils.SOS_token
+    EOS_IDX = utils.EOS_token
+    SUFFIX = ""
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-CLIP = 1
+    attn = Attention(ENC_HID_DIM, DEC_HID_DIM)
+    enc = Encoder(INPUT_DIM, ENC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, ENC_DROPOUT)
 
-best_valid_loss = float('inf')
-convergence_time = 0.0
-epochs_taken_to_converge = 0
-
-no_improvement_last_time = False 
-
-for epoch in range(NUM_EPOCHS):
-    
-    start_time = time.time()
-    
-    train_loss, train_acc, train_attn_mass = train(model, train_batches, 
-                                                optimizer, criterion, CLIP)
-    valid_loss, val_acc, val_attn_mass  = evaluate(model, dev_batches, criterion)
-    
-    end_time = time.time()
-    
-    epoch_mins, epoch_secs = epoch_time(start_time, end_time)
-    
-    if valid_loss < best_valid_loss:
-        best_valid_loss = valid_loss
-        torch.save(model.state_dict(), \
-            'data/models/model_' + TASK + SUFFIX + '_seed=' + str(SEED) + '_coeff=' \
-            + str(COEFF) + '_num-train=' + str(NUM_TRAIN) + '.pt') 
-        epochs_taken_to_converge = epoch + 1
-        convergence_time += (end_time - start_time)
-        no_improvement_last_time = False
+    if uniform: 
+        dec = DecoderUniform(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
+        SUFFIX = "_uniform"
+    elif no_attn or decode_with_no_attn:
+        dec = DecoderNoAttn(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
+        if no_attn: 
+            SUFFIX = "_no-attn"
     else:
-        # no improvement this time
-        if no_improvement_last_time:
-            break
-        no_improvement_last_time = True 
-
-    
-    print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
-    print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc:0.2f} \
-        | Train Attn Mass: {train_attn_mass:0.2f} | Train PPL: {math.exp(train_loss):7.3f}')
-    print(f'\t Val. Loss: {valid_loss:.3f} |   Val Acc: {val_acc:0.2f} \
-        |  Val. Attn Mass: {val_attn_mass:0.2f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
-
-# load the best model and print stats:
-model.load_state_dict(torch.load('data/models/model_' + TASK + SUFFIX + \
-    '_seed=' + str(SEED) + '_coeff=' + str(COEFF) + '_num-train=' + str(NUM_TRAIN) + '.pt'))
+        dec = Decoder(OUTPUT_DIM, DEC_EMB_DIM, ENC_HID_DIM, DEC_HID_DIM, DEC_DROPOUT, attn)
 
 
-test_loss, test_acc, test_attn_mass  = evaluate(model, test_batches, criterion)
-print(f'\t Test Loss: {test_loss:.3f} |  Test Acc: {test_acc:0.2f} \
-        |  Test Attn Mass: {test_attn_mass:0.2f} |  Test PPL: {math.exp(test_loss):7.3f}')
-
-log.pr_green (f"Final Test Accuracy ..........\t{test_acc:0.2f}")
-log.pr_green (f"Final Test Attention Mass ....\t{test_attn_mass:0.2f}")
-log.pr_green (f"Convergence time in seconds ..\t{convergence_time:0.2f}")
-log.pr_green (f"Sample efficiency in epochs ..\t{epochs_taken_to_converge}")
-
-
-src_lang.save_vocab("data/vocab/" + TASK + SUFFIX + '_seed=' + str(SEED) \
-     + '_coeff=' + str(COEFF) +  '_num-train=' + str(NUM_TRAIN) + ".src.vocab")
-trg_lang.save_vocab("data/vocab/" + TASK + SUFFIX + '_seed=' + str(SEED) \
-     + '_coeff=' + str(COEFF) +  '_num-train=' + str(NUM_TRAIN) + ".trg.vocab")
+    model = Seq2Seq(enc, dec, PAD_IDX, SOS_IDX, EOS_IDX, device).to(device)
+    # init weights 
+    model.apply(init_weights)
+    # count the params 
+    print(f'The model has {count_parameters(model):,} trainable parameters')
+    optimizer = optim.Adam(model.parameters())
+    criterion = nn.CrossEntropyLoss(ignore_index = PAD_IDX)
+    # --------- end of model definiition --------- #
 
 
-if TASK in ['en-hi', 'en-de']:
-    # generate the output to copmute bleu scores as well...
-    log.pr_green("generating the output translations from the model")
-    test_batches_single = list(get_batches(test_sents[0], test_sents[1], test_sents[2], 1))
-    output_lines = generate(model, test_batches_single)
-    log.pr_green("[done] .... now dumping the translations")
-    outfile = "data/" + TASK + SUFFIX + "_seed" + str(SEED) + \
-          '_coeff=' + str(COEFF) +  '_num-train=' + str(NUM_TRAIN) + ".test.out"
-    fw = open(outfile, 'w')
-    for line in output_lines:
-        fw.write(line.strip() + "\n")
-    fw.close()
+    # num_epochs = 5
+
+    CLIP = 1
+
+    best_valid_loss = float('inf')
+    convergence_time = 0.0
+    epochs_taken_to_converge = 0
+
+    no_improvement_last_time = False 
+
+    for epoch in range(num_epochs):
+        
+        start_time = time.time()
+        
+        train_loss, train_acc, train_attn_mass = train(model, train_batches, 
+                                                    optimizer, criterion, CLIP, coeff)
+        valid_loss, val_acc, val_attn_mass  = evaluate(model, dev_batches, criterion)
+        
+        end_time = time.time()
+        
+        epoch_mins, epoch_secs = epoch_time(start_time, end_time)
+        
+        if valid_loss < best_valid_loss:
+            best_valid_loss = valid_loss
+            torch.save(model.state_dict(), \
+                DATA_DIR + 'models/model_' + task + SUFFIX + '_seed=' + str(seed) + '_coeff=' \
+                + str(coeff) + '_num-train=' + str(num_train) + '.pt') 
+            epochs_taken_to_converge = epoch + 1
+            convergence_time += (end_time - start_time)
+            no_improvement_last_time = False
+        else:
+            # no improvement this time
+            if no_improvement_last_time:
+                break
+            no_improvement_last_time = True 
+
+        
+        print(f'Epoch: {epoch+1:02} | Time: {epoch_mins}m {epoch_secs}s')
+        print(f'\tTrain Loss: {train_loss:.3f} | Train Acc: {train_acc:0.2f} \
+            | Train Attn Mass: {train_attn_mass:0.2f} | Train PPL: {math.exp(train_loss):7.3f}')
+        print(f'\t Val. Loss: {valid_loss:.3f} |   Val Acc: {val_acc:0.2f} \
+            |  Val. Attn Mass: {val_attn_mass:0.2f} |  Val. PPL: {math.exp(valid_loss):7.3f}')
+
+    # load the best model and print stats:
+    model.load_state_dict(torch.load(DATA_DIR + 'models/model_' + task + SUFFIX + \
+        '_seed=' + str(seed) + '_coeff=' + str(coeff) + '_num-train=' + str(num_train) + '.pt'))
+
+
+    test_loss, test_acc, test_attn_mass  = evaluate(model, test_batches, criterion)
+    print(f'\t Test Loss: {test_loss:.3f} |  Test Acc: {test_acc:0.2f} \
+            |  Test Attn Mass: {test_attn_mass:0.2f} |  Test PPL: {math.exp(test_loss):7.3f}')
+
+    log.pr_green (f"Final Test Accuracy ..........\t{test_acc:0.2f}")
+    log.pr_green (f"Final Test Attention Mass ....\t{test_attn_mass:0.2f}")
+    log.pr_green (f"Convergence time in seconds ..\t{convergence_time:0.2f}")
+    log.pr_green (f"Sample efficiency in epochs ..\t{epochs_taken_to_converge}")
+
+
+    src_lang.save_vocab(DATA_DIR + "vocab/" + task + SUFFIX + '_seed=' + str(seed) \
+        + '_coeff=' + str(coeff) +  '_num-train=' + str(num_train) + ".src.vocab")
+    trg_lang.save_vocab(DATA_DIR + "vocab/" + task + SUFFIX + '_seed=' + str(seed) \
+        + '_coeff=' + str(coeff) +  '_num-train=' + str(num_train) + ".trg.vocab")
+
+
+    if task in ['en-hi', 'en-de']:
+        # generate the output to copmute bleu scores as well...
+        log.pr_green("generating the output translations from the model")
+        test_batches_single = list(get_batches(test_sents[0], test_sents[1], test_sents[2], 1, src_lang, trg_lang))
+        output_lines = generate(model, test_batches_single)
+        log.pr_green("[done] .... now dumping the translations")
+        outfile = DATA_DIR + task + SUFFIX + "_seed" + str(seed) + \
+            '_coeff=' + str(coeff) +  '_num-train=' + str(num_train) + ".test.out"
+        fw = open(outfile, 'w')
+        for line in output_lines:
+            fw.write(line.strip() + "\n")
+        fw.close()
+
+    return test_acc, test_attn_mass
+
+if __name__ == '__main__':
+    # --------------- parse the flags etc ----------------- #
+    parser = argparse.ArgumentParser(
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+
+    parser.add_argument('--task', dest='task', default='copy',
+            choices=('copy', 'rev', 'binary-flip', 'en-hi', 'en-de'),
+            help = 'select the task you want to run on')
+
+    parser.add_argument('--debug', dest='debug', action='store_true')
+    parser.add_argument('--loss-coeff', dest='loss_coeff', type=float, default=0.0)
+    parser.add_argument('--epochs', dest='epochs', type=int, default=5)
+    parser.add_argument('--seed', dest='seed', type=int, default=1234)
+    parser.add_argument('--uniform', dest='uniform', action='store_true')
+    parser.add_argument('--no-attn', dest='no_attn', action='store_true')
+    parser.add_argument('--batch-size', dest='batch_size', type=int, default=128)
+    parser.add_argument('--num-train', dest='num_train', type=int, default=1000000)
+    parser.add_argument('--decode-with-no-attn', dest='no_attn_inference', action='store_true')
+
+    params = vars(parser.parse_args())
+
+    run_seq2seq_experiment(
+        task = params['task'],
+        debug = params['debug'],
+        coeff = params['loss_coeff'],
+        num_epochs = params['epochs'],
+        uniform = params['uniform'],
+        no_attn = params['no_attn'],
+        num_train = params['num_train'],
+        decode_with_no_attn = params['no_attn_inference'],
+        seed = params['seed'],
+        batch_size = params['batch_size']
+    )
